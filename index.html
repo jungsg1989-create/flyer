@@ -499,6 +499,7 @@
     <div class="sheet-handle"></div>
     <div style="font-size:11px;letter-spacing:2px;color:var(--gold);text-transform:uppercase;margin-bottom:18px;opacity:0.8;">리플렛 수정</div>
 
+    <input type="hidden" id="editId">
     <div class="field-label">제목</div>
     <input class="field-input" type="text" id="editTitle" placeholder="제목">
 
@@ -1137,161 +1138,6 @@ async function confirmDelete(id) {
 }
 
 // ══════════════════════════════════════════════
-//  수정 모달
-// ══════════════════════════════════════════════
-let editTarget     = null;   // 수정 중인 leaflet 객체
-let editNewFiles   = [];     // 새로 추가할 이미지 파일
-let editKeepImages = [];     // 유지할 기존 이미지 URL 목록
-
-function openEditModal(id) {
-  const l = leaflets.find(x => x.id === id);
-  if (!l) return;
-  editTarget     = l;
-  editNewFiles   = [];
-  editKeepImages = [...l.images];
-
-  document.getElementById('editTitle').value       = l.title;
-  document.getElementById('editDesc').value        = l.description || '';
-  document.getElementById('editTogglePublic').classList.toggle('on', l.is_public);
-  document.getElementById('editFileInput').value   = '';
-
-  // 자동재생 칩 초기화
-  document.querySelectorAll('.edit-chip').forEach(c => {
-    c.classList.toggle('active', c.dataset.val === (l.autoplay || 'manual'));
-  });
-
-  // 기존 이미지 미리보기
-  renderEditPreviews();
-  document.getElementById('editOverlay').classList.remove('hidden');
-}
-
-function renderEditPreviews() {
-  const grid = document.getElementById('editPreviewGrid');
-  grid.innerHTML = '';
-  document.getElementById('editPageCount').textContent =
-    `(${editKeepImages.length + editNewFiles.length}장)`;
-
-  // 기존 유지 이미지
-  editKeepImages.forEach((url, i) => {
-    const item = document.createElement('div');
-    item.className = 'preview-item';
-    item.innerHTML = `<img src="${url}" alt="">
-      <div class="preview-num">${i + 1}</div>
-      <button class="preview-remove" onclick="removeEditKeep(${i})">✕</button>`;
-    grid.appendChild(item);
-  });
-
-  // 새로 추가할 이미지
-  editNewFiles.forEach((file, i) => {
-    const item = document.createElement('div');
-    item.className = 'preview-item';
-    item.style.outline = '2px solid rgba(212,175,106,0.5)';
-    const reader = new FileReader();
-    reader.onload = e => {
-      item.innerHTML = `<img src="${e.target.result}" alt="">
-        <div class="preview-num" style="background:rgba(212,175,106,0.6);color:#0F1B2D;">${editKeepImages.length + i + 1}</div>
-        <button class="preview-remove" onclick="removeEditNew(${i})">✕</button>`;
-    };
-    reader.readAsDataURL(file);
-    grid.appendChild(item);
-  });
-}
-
-function removeEditKeep(i) {
-  editKeepImages.splice(i, 1);
-  renderEditPreviews();
-}
-function removeEditNew(i) {
-  editNewFiles.splice(i, 1);
-  renderEditPreviews();
-}
-function setEditAutoplay(el) {
-  document.querySelectorAll('.edit-chip').forEach(c => c.classList.remove('active'));
-  el.classList.add('active');
-}
-function handleEditFiles(files) {
-  Array.from(files).forEach(file => {
-    const total = editKeepImages.length + editNewFiles.length;
-    if (total >= 20) { showToast('최대 20장까지 가능합니다'); return; }
-    if (file.size > 10 * 1024 * 1024) { showToast(`${file.name}: 10MB 초과`); return; }
-    editNewFiles.push(file);
-  });
-  renderEditPreviews();
-}
-function handleEditDrop(e) {
-  e.preventDefault();
-  document.getElementById('editUploadZone').classList.remove('drag');
-  handleEditFiles(e.dataTransfer.files);
-}
-function closeEditModal() {
-  document.getElementById('editOverlay').classList.add('hidden');
-  editTarget = null; editNewFiles = []; editKeepImages = [];
-}
-function handleEditOverlayClick(e) {
-  if (e.target === document.getElementById('editOverlay')) closeEditModal();
-}
-
-async function saveEdit() {
-  if (!editTarget) return;
-  const title = document.getElementById('editTitle').value.trim();
-  if (!title) { showToast('제목을 입력해주세요'); return; }
-
-  const totalImages = editKeepImages.length + editNewFiles.length;
-  if (totalImages === 0) { showToast('이미지를 최소 1장 남겨주세요'); return; }
-
-  showSpinner('수정 저장 중...');
-  closeEditModal();
-
-  try {
-    const isPublic = document.getElementById('editTogglePublic').classList.contains('on');
-    const autoplay = document.querySelector('.edit-chip.active')?.dataset.val || 'manual';
-    const desc     = document.getElementById('editDesc').value.trim();
-    const lid      = editTarget.id;
-
-    // 1. leaflets 기본 정보 업데이트
-    const { error: updErr } = await sb.from('leaflets')
-      .update({ title, description: desc, is_public: isPublic, autoplay })
-      .eq('id', lid);
-    if (updErr) throw updErr;
-
-    // 2. 기존 페이지 전체 삭제 후 재삽입 (순서 보장)
-    const { error: delErr } = await sb.from('leaflet_pages').delete().eq('leaflet_id', lid);
-    if (delErr) throw delErr;
-
-    const pageInserts = [];
-    let order = 0;
-
-    // 유지할 기존 이미지
-    for (const url of editKeepImages) {
-      pageInserts.push({ leaflet_id: lid, page_order: order++, image_url: url });
-    }
-
-    // 새로 추가할 이미지 업로드
-    for (let i = 0; i < editNewFiles.length; i++) {
-      const file = editNewFiles[i];
-      const ext  = file.name.split('.').pop();
-      const path = `${lid}/edit_${order}_${Date.now()}.${ext}`;
-      document.getElementById('spinnerText').textContent = `이미지 업로드 중... (${i+1}/${editNewFiles.length})`;
-      const { error: upErr } = await sb.storage.from(BUCKET).upload(path, file, { upsert: true });
-      if (upErr) throw upErr;
-      const { data: urlData } = sb.storage.from(BUCKET).getPublicUrl(path);
-      pageInserts.push({ leaflet_id: lid, page_order: order++, image_url: urlData.publicUrl });
-    }
-
-    const { error: insErr } = await sb.from('leaflet_pages').insert(pageInserts);
-    if (insErr) throw insErr;
-
-    await loadAllLeaflets();
-    showToast('수정이 완료되었습니다');
-  } catch (err) {
-    console.error(err);
-    showToast('수정 오류: ' + (err.message || err));
-  } finally {
-    hideSpinner();
-  }
-}
-
-// ══════════════════════════════════════════════
 //  비밀번호 변경
 // ══════════════════════════════════════════════
 function togglePwForm() {
@@ -1387,6 +1233,9 @@ function closeEditModal() {
   editUploadedFiles = [];
 }
 
+function handleEditOverlayClick(e) {
+  if (e.target === document.getElementById('editOverlay')) closeEditModal();
+}
 function setEditAutoplay(el) {
   document.querySelectorAll('.edit-chip').forEach(c => c.classList.remove('active'));
   el.classList.add('active');
